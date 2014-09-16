@@ -1,14 +1,16 @@
+{-# LANGUAGE OverloadedStrings #-}
+
 module Parser where
 
 import Control.Applicative
-import Control.Monad (forM_)
+import Control.Monad
 import Data.Text as T
 import Debug.Trace
 import Text.Parsec.Char
 import Text.Parsec.Combinator hiding (optional)
 import Text.Parsec.Prim hiding (many, (<|>))
 import Text.Parsec.Text
-import Text.Parsec.Token hiding (whiteSpace)
+import Text.Parsec.Token hiding (whiteSpace, symbol)
 
 data Expr
     = EAdd Expr Expr
@@ -20,6 +22,9 @@ data Expr
 
 whiteSpace :: Parser ()
 whiteSpace = () <$ many (char ' ')
+
+symbol :: Text -> Parser ()
+symbol str = () <$ (whiteSpace *> string (unpack str) <* whiteSpace)
 
 num :: Parser Expr
 num = trace "num" $ ENum . read <$> go (oneOf "0123456789")
@@ -35,11 +40,11 @@ term :: Parser Expr
 term = trace "term" $ choice [ num ] <* whiteSpace
 
 addop :: Parser (Expr -> Expr -> Expr)
-addop = trace "addop" $ EAdd <$ (trace "1.." (string "+" <* whiteSpace))
-    <|> ESub <$ (trace "2.." (string "-" <* whiteSpace))
+addop = trace "addop" $ EAdd <$ (trace "1.." (symbol "+"))
+    <|> ESub <$ (trace "2.." (symbol "-"))
 
 mulop :: Parser (Expr -> Expr -> Expr)
-mulop = trace "mulop" $ EMul <$ (string "*" <* whiteSpace)
+mulop = trace "mulop" $ EMul <$ (symbol "*")
     <|> EDiv <$ (string "/" <* whiteSpace)
 
 expr :: Parser Expr
@@ -48,8 +53,11 @@ expr = trace "expr" $ subexpr `chainl1` addop
 subexpr :: Parser Expr
 subexpr = trace "subexpr" $ factor `chainl1` mulop
 
+parenthesis :: Parser Expr -> Parser Expr
+parenthesis = between (symbol "(") (symbol ")")
+
 factor :: Parser Expr
-factor = parens expr <|> term
+factor = parenthesis expr <|> term
 
 evalExpr :: Expr -> Double
 evalExpr (ENum n) = n
@@ -64,18 +72,24 @@ massage txt =
         "" -> Nothing
         x  -> Just x
 
-test :: Text -> IO ()
-test str =
+evalText :: Text -> Text
+evalText str =
     case massage str of
-        Nothing -> return ()
-        Just input -> case parse expr "" input of
-            Left e  -> error (show e)
-            Right x -> print (evalExpr x)
+        Nothing -> ""
+        Just input -> pack $ case parse expr "" input of
+            Left e  -> show e
+            Right x -> show (evalExpr x)
+
+test :: Text -> IO ()
+test = putStrLn . unpack . evalText
 
 testFile :: FilePath -> IO ()
 testFile path = do
     str <- readFile path
-    forM_ (T.lines (pack str)) $ \l -> test l
+    forM_ (T.lines (pack str)) test
     -- case parse (many expr <* eof) path (pack str) of
     --     Left e   -> error (show e)
     --     Right xs -> forM_ xs $ print . evalExpr
+
+repl :: IO ()
+repl = forever $ test . pack =<< getLine
