@@ -1,4 +1,5 @@
 {-# LANGUAGE OverloadedStrings #-}
+{-# LANGUAGE ViewPatterns #-}
 
 module Parser where
 
@@ -8,6 +9,7 @@ import Control.Monad.IO.Class
 import Control.Monad.Trans.State
 import Data.Functor.Identity
 import Data.Map
+import Data.Monoid
 import Data.Text as T
 import Data.Text.IO as T
 import Debug.Trace
@@ -23,9 +25,21 @@ data Expr
     | EMul Expr Expr
     | EDiv Expr Expr
     | ELet Text Expr
+    | ELam Text (Env -> Double -> Double)
+    | EApp Text Expr
     | EVar Text
     | ENum Double
-    deriving Show
+
+instance Show Expr where
+    show (EAdd x y) = show x <> " + " <> show y
+    show (ESub x y) = show x <> " - " <> show y
+    show (EMul x y) = show x <> " * " <> show y
+    show (EDiv x y) = show x <> " / " <> show y
+    show (ELet n b) = "let " <> unpack n <> " = " <> show b
+    show (ELam n _) = "#<function " ++ unpack n ++ ">"
+    show (EApp n x) = unpack n ++ "(" ++ show x ++ ")"
+    show (EVar n)   = "<var " <> unpack n <> ">"
+    show (ENum n)   = show n
 
 whiteSpace :: Parser ()
 whiteSpace = () <$ many (char ' ')
@@ -53,6 +67,8 @@ term :: Parser Expr
 term = trace "term" $ choice terms <* whiteSpace
   where
     terms = [ letBinding
+            , try funBinding
+            , try funCall
             , variable
             , try num
             ]
@@ -63,7 +79,7 @@ addop = trace "addop" $ EAdd <$ symbol "+"
 
 mulop :: Parser (Expr -> Expr -> Expr)
 mulop = trace "mulop" $ EMul <$ symbol "*"
-    <|> EDiv <$ string "/"
+    <|> EDiv <$ symbol "/"
 
 expr :: Parser Expr
 expr = trace "expr" $ subexpr `chainl1` addop
@@ -77,19 +93,38 @@ parenthesis = between (symbol "(") (symbol ")")
 factor :: Parser Expr
 factor = parenthesis expr <|> term
 
-letBinding :: Parser Expr
-letBinding = trace "letBinding" $ do
-    trace "letBinding Parser.hs:81.." $ return ()
-    symbol "let"
-    trace "letBinding Parser.hs:83.." $ return ()
+funCall :: Parser Expr
+funCall = do
     name <- varname
-    trace "letBinding Parser.hs:85.." $ return ()
+    symbol "("
+    arg  <- expr
+    symbol ")"
+    return $ EApp name arg
+
+funBinding :: Parser Expr
+funBinding = do
+    symbol "define"
+    name <- varname
+    symbol "("
+    arg  <- varname
+    symbol ")"
+    symbol "{"
+    body <- sepBy1 expr newline
+    symbol "}"
+    return $ ELam name $ \env x ->
+        let env' = Env (insert arg (ENum x) (getEnv env))
+        in runIdentity $ flip evalStateT env' $
+            foldM (\_ b -> evalExpr b) 0.0 body
+
+letBinding :: Parser Expr
+letBinding = do
+    symbol "let"
+    name <- varname
     symbol "="
-    trace "letBinding Parser.hs:87.." $ return ()
     body <- expr
     return $ ELet name body
 
-newtype Env = Env { getEnv :: Map Text Double }
+newtype Env = Env { getEnv :: Map Text Expr }
 
 newEnv :: Env
 newEnv = Env Data.Map.empty
@@ -105,15 +140,26 @@ evalExpr (EMul x y) = (*) <$> evalExpr x <*> evalExpr y
 evalExpr (EDiv x y) = (/) <$> evalExpr x <*> evalExpr y
 
 evalExpr (ELet n b) = do
-    b' <- evalExpr b
-    modify $ Env . insert n b' . getEnv
-    return b'
+    modify $ Env . insert n b . getEnv
+    evalExpr b
 
 evalExpr (EVar n) = do
     env <- get
     case Data.Map.lookup n (getEnv env) of
         Nothing -> error $ "Unknown variable: " ++ unpack n
-        Just b  -> return b
+        Just b  -> evalExpr b
+
+evalExpr f@(ELam n _) = do
+    trace ("evalExpr ELam: " ++ show n) $ return ()
+    modify $ Env . insert n f . getEnv
+    return 0
+
+evalExpr (EApp n x) = do
+    x' <- evalExpr x
+    env <- get
+    case Data.Map.lookup n (getEnv env) of
+        Just (ELam _ f) -> return $ f env x'
+        _ -> error $ "Unknown function: " ++ unpack n
 
 massage :: Text -> Maybe Text
 massage txt =
@@ -135,10 +181,16 @@ test = T.putStrLn . evalText
 testFile :: FilePath -> IO ()
 testFile path = do
     str <- T.readFile path
-    forM_ (T.lines str) test
-    -- case parse (many expr <* eof) path (pack str) of
-    --     Left e   -> error (show e)
-    --     Right xs -> forM_ xs $ print . evalExpr
+    _ <- flip execStateT newEnv $
+        forM_ (T.lines str) $ \input ->
+            case massage input of
+                Nothing -> return ()
+                Just input' -> case parse (expr <* eof) path input' of
+                    Left e  -> liftIO $ print e
+                    Right x -> do
+                        a <- hoist (return . runIdentity) (evalExpr x)
+                        liftIO $ print a
+    return ()
 
 repl :: IO ()
 repl = do
