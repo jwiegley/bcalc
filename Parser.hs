@@ -1,5 +1,4 @@
 {-# LANGUAGE OverloadedStrings #-}
-{-# LANGUAGE ViewPatterns #-}
 
 module Parser where
 
@@ -12,7 +11,6 @@ import Data.Map
 import Data.Monoid
 import Data.Text as T
 import Data.Text.IO as T
-import Debug.Trace
 import Text.Parsec.Char
 import Text.Parsec.Combinator hiding (optional)
 import Text.Parsec.Prim hiding (many, (<|>), State)
@@ -23,6 +21,7 @@ data Expr
     = EAdd Expr Expr
     | ESub Expr Expr
     | EMul Expr Expr
+    | EPow Expr Expr
     | EDiv Expr Expr
     | ELet Text Expr
     | ELam Text (Env -> Double -> Double)
@@ -34,6 +33,7 @@ instance Show Expr where
     show (EAdd x y) = show x <> " + " <> show y
     show (ESub x y) = show x <> " - " <> show y
     show (EMul x y) = show x <> " * " <> show y
+    show (EPow x y) = show x <> " ^ " <> show y
     show (EDiv x y) = show x <> " / " <> show y
     show (ELet n b) = "let " <> unpack n <> " = " <> show b
     show (ELam n _) = "#<function " ++ unpack n ++ ">"
@@ -42,13 +42,13 @@ instance Show Expr where
     show (ENum n)   = show n
 
 whiteSpace :: Parser ()
-whiteSpace = () <$ many (char ' ')
+whiteSpace = () <$ many (oneOf " \t")
 
 symbol :: Text -> Parser ()
 symbol str = () <$ (whiteSpace *> string (unpack str) <* whiteSpace)
 
 num :: Parser Expr
-num = trace "num" $ ENum . read <$> go (oneOf "0123456789")
+num = ENum . read <$> go (oneOf "0123456789")
   where
     go np = do
         x <- many np
@@ -64,7 +64,7 @@ variable :: Parser Expr
 variable = EVar <$> varname
 
 term :: Parser Expr
-term = trace "term" $ choice terms <* whiteSpace
+term = choice terms <* whiteSpace
   where
     terms = [ letBinding
             , try funBinding
@@ -74,18 +74,19 @@ term = trace "term" $ choice terms <* whiteSpace
             ]
 
 addop :: Parser (Expr -> Expr -> Expr)
-addop = trace "addop" $ EAdd <$ symbol "+"
+addop = EAdd <$ symbol "+"
     <|> ESub <$ symbol "-"
 
 mulop :: Parser (Expr -> Expr -> Expr)
-mulop = trace "mulop" $ EMul <$ symbol "*"
+mulop = EMul <$ symbol "*"
+    <|> EPow <$ symbol "^"
     <|> EDiv <$ symbol "/"
 
 expr :: Parser Expr
-expr = trace "expr" $ subexpr `chainl1` addop
+expr = subexpr `chainl1` addop
 
 subexpr :: Parser Expr
-subexpr = trace "subexpr" $ factor `chainl1` mulop
+subexpr = factor `chainl1` mulop
 
 parenthesis :: Parser Expr -> Parser Expr
 parenthesis = between (symbol "(") (symbol ")")
@@ -109,7 +110,7 @@ funBinding = do
     arg  <- varname
     symbol ")"
     symbol "{"
-    body <- sepBy1 expr newline
+    body <- sepBy1 expr (symbol ";")
     symbol "}"
     return $ ELam name $ \env x ->
         let env' = Env (insert arg (ENum x) (getEnv env))
@@ -127,7 +128,7 @@ letBinding = do
 newtype Env = Env { getEnv :: Map Text Expr }
 
 newEnv :: Env
-newEnv = Env Data.Map.empty
+newEnv = Env $ Data.Map.singleton "sqrt" (ELam "sqrt" (const sqrt))
 
 eval :: Expr -> Double
 eval x = runIdentity $ evalStateT (evalExpr x) newEnv
@@ -137,11 +138,13 @@ evalExpr (ENum n)   = return n
 evalExpr (EAdd x y) = (+) <$> evalExpr x <*> evalExpr y
 evalExpr (ESub x y) = (-) <$> evalExpr x <*> evalExpr y
 evalExpr (EMul x y) = (*) <$> evalExpr x <*> evalExpr y
+evalExpr (EPow x y) = (**) <$> evalExpr x <*> evalExpr y
 evalExpr (EDiv x y) = (/) <$> evalExpr x <*> evalExpr y
 
 evalExpr (ELet n b) = do
-    modify $ Env . insert n b . getEnv
-    evalExpr b
+    b' <- evalExpr b
+    modify $ Env . insert n (ENum b') . getEnv
+    evalExpr $ ENum b'
 
 evalExpr (EVar n) = do
     env <- get
@@ -150,7 +153,6 @@ evalExpr (EVar n) = do
         Just b  -> evalExpr b
 
 evalExpr f@(ELam n _) = do
-    trace ("evalExpr ELam: " ++ show n) $ return ()
     modify $ Env . insert n f . getEnv
     return 0
 
@@ -202,3 +204,5 @@ repl = do
                 a <- hoist (return . runIdentity) (evalExpr x)
                 liftIO $ print a
     return ()
+
+main = repl
